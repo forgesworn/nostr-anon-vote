@@ -1,0 +1,37 @@
+{
+  "name": "nostr-anon-vote",
+  "version": "0.0.0-development",
+  "description": "Anonymous voting on Nostr with LSAG ring signatures — double-vote prevention without revealing identity",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc",
+    "test": "node node_modules/vitest/vitest.mjs run",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": ["voting", "anonymous", "lsag", "ring-signature", "nostr", "dao", "governance", "election"],
+  "author": "Darren",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/forgesworn/nostr-anon-vote.git"
+  },
+  "dependencies": {
+    "secp256k1-ring-sig": "file:../secp256k1-ring-sig",
+    "@noble/curves": "^1.8.1",
+    "@noble/hashes": "^1.7.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
