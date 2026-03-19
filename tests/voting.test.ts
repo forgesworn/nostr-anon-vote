@@ -15,7 +15,7 @@ import {
   encryptBallotContent, decryptBallotContent,
   validateElection, validateBallot, validateElectionResult,
 } from '../src/voting.js';
-import { computeKeyImage } from 'secp256k1-ring-sig';
+import { computeKeyImage } from '@forgesworn/ring-sig';
 import { generateKeyPair } from '../src/nostr.js';
 
 describe('voting extension', () => {

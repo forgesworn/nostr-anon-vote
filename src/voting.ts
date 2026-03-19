@@ -7,8 +7,8 @@ import { hkdf } from '@noble/hashes/hkdf';
 import { bytesToHex, hexToBytes, utf8ToBytes, randomBytes } from '@noble/hashes/utils';
 import { generateKeyPair as genKey, getPublicKey, signEvent, getTagValue, validateFieldSizeBounds } from './nostr.js';
 import { VOTING_KINDS, DEFAULT_LABEL, DEFAULT_CRYPTO_ALGORITHM } from './constants.js';
-import { computeKeyImage, lsagSign, lsagVerify } from 'secp256k1-ring-sig';
-import type { LsagSignature } from 'secp256k1-ring-sig';
+import { computeKeyImage, lsagSign, lsagVerify } from '@forgesworn/ring-sig';
+import type { LsagSignature } from '@forgesworn/ring-sig';
 import { VotingError, CryptoError, ValidationError } from './errors.js';
 import type {
   ValidationResult,
