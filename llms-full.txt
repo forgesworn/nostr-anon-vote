@@ -1,0 +1,351 @@
+# nostr-anon-vote — Full AI Reference
+
+Anonymous voting on Nostr using LSAG ring signatures. Voters prove they are eligible without revealing which member voted. Double-vote prevention works without unmasking anyone.
+
+Repository: https://github.com/forgesworn/nostr-anon-vote
+npm: npm install nostr-anon-vote
+Language: TypeScript (ESM, Node.js 24+)
+Licence: MIT
+
+---
+
+## What it does
+
+nostr-anon-vote provides:
+
+1. Election creation — kind 30482 Nostr events that define the eligible voter set, voting options, and timing.
+2. Anonymous ballot casting — kind 30483 events signed by ephemeral keypairs, carrying LSAG ring signatures that prove eligibility without revealing identity.
+3. Double-vote detection — each ballot includes a key image that is unique per voter per election; the tally authority can detect duplicates without unmasking anyone.
+4. Encrypted votes — vote content is ECDH-encrypted to the tally authority's public key and cannot be read until tallying.
+5. Election results — kind 30484 events with per-option counts, auditable by anyone who re-runs verifyBallot on every ballot.
+
+---
+
+## Event kinds
+
+| Kind  | Name            | Description                                      |
+|-------|-----------------|--------------------------------------------------|
+| 30482 | Election        | Defines eligible voters, options, timing         |
+| 30483 | Ballot          | Anonymous vote with LSAG sig and key image       |
+| 30484 | Election Result | Tallied counts, verifiable by any third party    |
+
+Kind numbers are provisional pending NIP assignment. All events carry NIP-32 labels: `["L", "anon-vote"]` and `["l", "anon-vote"]`.
+
+---
+
+## Cryptographic model
+
+### LSAG ring signatures
+
+LSAG (Linkable Spontaneous Anonymous Group) signatures prove "I know the private key for one of these N public keys" without revealing which one. Provided by @forgesworn/ring-sig on secp256k1.
+
+The LSAG message is `electionId:sha256(encryptedVote)` — binding the signature to the specific ciphertext. A signature cannot be replayed against a different vote payload.
+
+### Key images
+
+Computed internally as `computeKeyImage(privkey, pubkey, electionId)`. Deterministic per voter per election. Two ballots from the same voter in the same election carry identical key images, enabling the tally to detect and handle duplicates — without knowing which ring member voted.
+
+### Ballot encryption
+
+ECDH (ephemeral secp256k1 keypair x tally pubkey) → SHA-256 of shared x-coordinate → HKDF-SHA256 (info: `'signet-ballot-encrypt-v1'`) → AES-256-GCM.
+
+Serialised as hex: ephemeralPubkey (64 chars) + nonce (24 chars) + ciphertext+tag (variable).
+
+Note: the HKDF info string `'signet-ballot-encrypt-v1'` is a historical artefact — do not change it, changing it breaks decryption of existing ballots.
+
+### Ballot event pubkey
+
+`castBallot` generates a fresh ephemeral keypair and signs the ballot event with it. The voter's real Nostr pubkey never appears on-chain. You cannot link a ballot to its author by inspecting `event.pubkey`.
+
+---
+
+## API surface
+
+### Election
+
+```typescript
+import { createElection, parseElection, validateElection } from 'nostr-anon-vote';
+
+// Create a kind 30482 election event (signed by authority private key)
+const election = await createElection(authorityPrivkey: string, params: ElectionParams): Promise<NostrEvent>
+
+// Parse a kind 30482 event into structured data; returns null if malformed
+const parsed = parseElection(event: NostrEvent): ParsedElection | null
+
+// Structural validation (does not verify cryptographic signatures)
+const check = validateElection(event: NostrEvent): ValidationResult
+```
+
+ElectionParams fields:
+- `electionId: string` — unique identifier (used as NIP-33 d-tag and in key image derivation)
+- `title: string` — human-readable election title
+- `description?: string` — optional longer description
+- `options: string[]` — voting options, minimum 2
+- `scale: ElectionScale` — `'organisational' | 'community' | 'national'`
+- `eligibleEntityTypes: string[]` — e.g. `['member']`
+- `eligibleMinTier?: number` — minimum tier (default 1)
+- `eligibleCommunity?: string` — optional community filter
+- `opens: number` — Unix timestamp (seconds)
+- `closes: number` — Unix timestamp (seconds), must be after opens
+- `reVote: ReVotePolicy` — `'allowed' | 'denied'`
+- `tallyPubkeys: string[]` — x-only hex pubkeys of tally authorities, minimum 1
+- `tallyThreshold?: [number, number]` — e.g. `[2, 3]` for 2-of-3
+- `ringSize?: number` — max ring size hint (2–1000)
+
+ParsedElection fields mirror ElectionParams plus `authorityPubkey: string` and `algorithm: string`.
+
+### Voting
+
+```typescript
+import { castBallot, verifyBallot, validateBallot } from 'nostr-anon-vote';
+
+// Cast a ballot — voter automatically located in ring; throws if not found
+const { event, ephemeralPubkey } = await castBallot(
+  voterPrivkey: string,
+  election: NostrEvent,
+  selectedOption: string,
+  eligibleRing: string[],  // ordered array of x-only hex pubkeys
+): Promise<{ event: NostrEvent; ephemeralPubkey: string }>
+
+// Verify ballot ring signature and time window — does NOT check key image uniqueness
+const check = verifyBallot(
+  ballot: NostrEvent,
+  election: NostrEvent,
+  eligibleRing: string[],
+): ValidationResult
+
+// Structural validation only
+const check = validateBallot(event: NostrEvent): ValidationResult
+```
+
+### Tallying
+
+```typescript
+import { tallyElection, encryptBallotContent, decryptBallotContent, validateElectionResult } from 'nostr-anon-vote';
+
+// Verify, deduplicate, decrypt, count, and publish a kind 30484 result event
+const result = await tallyElection(
+  ballots: NostrEvent[],
+  election: NostrEvent,
+  tallyPrivkey: string,
+  eligibleRing: string[],
+): Promise<NostrEvent>
+
+// Encrypt plaintext to a tally pubkey (used internally by castBallot)
+const encrypted = await encryptBallotContent(plaintext: string, tallyPubkey: string): Promise<string>
+
+// Decrypt with the tally private key
+const plaintext = await decryptBallotContent(encrypted: string, tallyPrivkey: string): Promise<string>
+
+// Structural validation of a kind 30484 event
+const check = validateElectionResult(event: NostrEvent): ValidationResult
+```
+
+### Errors
+
+```typescript
+import { VotingError, ValidationError, CryptoError } from 'nostr-anon-vote';
+// VotingError — base class for all errors thrown from public API
+// ValidationError extends VotingError — malformed events, missing tags, bounds exceeded
+// CryptoError extends VotingError — invalid keys, ECDH failures
+```
+
+### Constants and types
+
+```typescript
+import {
+  VOTING_KINDS,               // { ELECTION: 30482, BALLOT: 30483, ELECTION_RESULT: 30484 }
+  DEFAULT_LABEL,              // 'anon-vote'
+  DEFAULT_CRYPTO_ALGORITHM,   // 'secp256k1'
+} from 'nostr-anon-vote';
+
+// Types
+ElectionScale         // 'organisational' | 'community' | 'national'
+ReVotePolicy          // 'allowed' | 'denied'
+ElectionParams        // input to createElection
+ParsedElection        // output of parseElection
+ValidationResult      // { valid: boolean; errors: string[] }
+NostrEvent            // { id, pubkey, created_at, kind, tags, content, sig }
+UnsignedEvent         // NostrEvent without id and sig
+```
+
+---
+
+## Event structure
+
+### Kind 30482 — Election
+
+Required tags:
+- `["d", electionId]`
+- `["title", title]`
+- `["scale", scale]`
+- `["opens", unixSeconds]`
+- `["closes", unixSeconds]`
+- `["re-vote", "allowed" | "denied"]`
+- `["algo", "secp256k1"]`
+- `["L", "anon-vote"]`
+- `["l", "anon-vote"]`
+- `["option", optionName]` — one tag per option (minimum 2)
+- `["tally-pubkey", xOnlyHexPubkey]` — one tag per tally authority (minimum 1)
+
+Optional tags:
+- `["description", text]`
+- `["eligible-entity-type", entityType]` — repeatable
+- `["eligible-min-tier", tier]`
+- `["eligible-community", communityId]`
+- `["tally-threshold", "m/n"]`
+- `["ring-size", maxSize]`
+
+### Kind 30483 — Ballot
+
+Required tags:
+- `["d", "electionId:randomHex"]` — unique per ballot
+- `["election", electionEventId]`
+- `["key-image", keyImageHex]`
+- `["ring-sig", jsonSerialised]` — serialised LsagSignature
+- `["encrypted-vote", encryptedHex]`
+- `["algo", "secp256k1"]`
+- `["L", "anon-vote"]`
+- `["l", "anon-vote"]`
+
+Note: `event.pubkey` is the ephemeral pubkey, not the voter's real key.
+
+### Kind 30484 — Election Result
+
+Required tags:
+- `["d", "electionId:result"]`
+- `["election", electionEventId]`
+- `["total-ballots", count]`
+- `["total-eligible", count]`
+- `["total-invalid", count]`
+- `["result", optionName, count]` — one tag per option
+- `["algo", "secp256k1"]`
+- `["L", "anon-vote"]`
+- `["l", "anon-vote"]`
+
+---
+
+## Security properties and limits
+
+| Limit                        | Value        |
+|------------------------------|--------------|
+| Max content length           | 65 536 chars |
+| Max tag value length         | 1 024 chars  |
+| Max tags per event           | 100          |
+| Max ring size                | 1 000        |
+| Min ring size                | 2            |
+| Future timestamp tolerance   | 60 seconds   |
+
+- verifyBallot does NOT check key image uniqueness — that is the tally authority's responsibility.
+- castBallot validates that the election is currently open using Date.now(). Backdating created_at does not bypass this.
+- Ballot events signed by ephemeral keys have no associated Nostr profile. Relays requiring POW or NIP-42 authentication may reject them.
+
+---
+
+## Full flow example
+
+```typescript
+import {
+  createElection,
+  castBallot,
+  verifyBallot,
+  tallyElection,
+  VOTING_KINDS,
+} from 'nostr-anon-vote';
+
+// Participants (hex-encoded x-only secp256k1 pubkeys)
+const authorityPrivkey = 'aaa...';
+const tallyPrivkey     = 'bbb...';
+const tallyPubkey      = 'bbb...pub';  // derived from tallyPrivkey
+
+const voter1Privkey = 'ccc...';
+const voter1Pubkey  = 'ccc...pub';
+const voter2Pubkey  = 'ddd...pub';
+const voter3Pubkey  = 'eee...pub';
+
+// Ring order MUST be consistent across all calls
+const eligibleRing = [voter1Pubkey, voter2Pubkey, voter3Pubkey];
+
+// 1. Create election (kind 30482)
+const election = await createElection(authorityPrivkey, {
+  electionId: 'proposal-xyz-2026',
+  title: 'Adopt proposal XYZ?',
+  options: ['Yes', 'No', 'Abstain'],
+  scale: 'community',
+  eligibleEntityTypes: ['member'],
+  eligibleMinTier: 1,
+  opens: Math.floor(Date.now() / 1000),
+  closes: Math.floor(Date.now() / 1000) + 86400,
+  reVote: 'allowed',
+  tallyPubkeys: [tallyPubkey],
+});
+// Publish election to Nostr relays...
+
+// 2. Cast a ballot (kind 30483)
+// castBallot locates voter1 in the ring automatically — throws if not found
+const { event: ballot } = await castBallot(
+  voter1Privkey,
+  election,
+  'Yes',
+  eligibleRing,
+);
+// Publish ballot to Nostr relays...
+
+// 3. Verify a ballot (no tally key required — anyone can do this)
+const check = verifyBallot(ballot, election, eligibleRing);
+console.log(check.valid);   // true
+console.log(check.errors);  // []
+
+// 4. Tally (kind 30484) — after election closes
+// Collect all ballot events from relays, then:
+const result = await tallyElection(
+  [ballot /*, ...more ballots */],
+  election,
+  tallyPrivkey,
+  eligibleRing,
+);
+// result.tags includes ["result", "Yes", "1"], ["result", "No", "0"], etc.
+// Publish result to Nostr relays...
+```
+
+---
+
+## Re-vote example
+
+```typescript
+// If reVote is 'allowed', submit a second ballot — tallying keeps the latest
+const { event: ballot2 } = await castBallot(
+  voter1Privkey,
+  election,   // same election
+  'No',       // changed vote
+  eligibleRing,
+);
+// ballot and ballot2 share the same key image
+// tallyElection will keep ballot2 (higher created_at)
+```
+
+---
+
+## Gotchas
+
+1. Ring order is part of the LSAG signature. The eligibleRing array must be in the same order in castBallot, verifyBallot, and tallyElection. Order mismatch causes verification failure.
+
+2. verifyBallot does not deduplicate. It checks the cryptographic validity of a single ballot. Key image deduplication happens inside tallyElection only.
+
+3. castBallot uses Date.now() internally for the created_at check. You cannot sign a ballot for a closed election by backdating the event timestamp.
+
+4. Ephemeral keypairs mean no Nostr profile. Some relays reject events from pubkeys with no profile or without NIP-42 authentication. If your relay setup requires it, pre-register a throwaway profile for the ephemeral pubkey before publishing.
+
+5. The HKDF info string 'signet-ballot-encrypt-v1' is fixed. It is a historical artefact, not a dependency on any Signet system. Do not change it — doing so breaks decryption of all existing ballots.
+
+6. First npm publish must be manual. The CI release job uses OIDC trusted publishing, which requires the package to already exist on npm. Run `npm publish --access public` once to bootstrap it.
+
+---
+
+## Dependencies
+
+| Package                 | Purpose                                    |
+|-------------------------|--------------------------------------------|
+| @forgesworn/ring-sig    | LSAG ring signature generation/verification|
+| @noble/curves           | secp256k1 ECDH for ballot encryption       |
+| @noble/hashes           | SHA-256, HKDF                              |
