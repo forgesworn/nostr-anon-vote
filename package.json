@@ -42,8 +42,6 @@
     "@noble/hashes": "^1.7.1"
   },
   "devDependencies": {
-    "@semantic-release/changelog": "^6.0.3",
-    "@semantic-release/git": "^10.0.1",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
   }

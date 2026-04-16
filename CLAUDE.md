@@ -94,9 +94,7 @@ Required tags: `d` (`electionId:result`), `election`, `total-ballots`, `total-el
 
 ## CI / release
 
-CI runs on GitHub Actions (`.github/workflows/ci.yml`): typecheck → test → semantic-release on main.
-
-**CI is currently failing** on the `release` job: the npm OIDC token exchange returns a 404 ("package not found") because `nostr-anon-vote` has not yet been published to npm for the first time. Trusted publishing (provenance) requires the package to exist on npm before OIDC exchange succeeds. First publish must be done manually with `npm publish --access public`.
+CI runs on GitHub Actions (`.github/workflows/ci.yml`): typecheck → test. Releases via `forgesworn/anvil@v0` (workflow_call) on push to main.
 
 ## Dependencies
 
@@ -107,4 +105,4 @@ CI runs on GitHub Actions (`.github/workflows/ci.yml`): typecheck → test → s
 | `@noble/hashes` | SHA-256, HKDF |
 | `typescript` (dev) | TypeScript compiler |
 | `vitest` (dev) | Test runner |
-| `@semantic-release/*` (dev) | Automated versioning and npm publish |
+
