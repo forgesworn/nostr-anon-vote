@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0 (2026-07-28)
+
+### Features
+
+- lift the 5-voter ceiling and pin the eligible ring
+
+
+
 ## 0.1.0 (2026-04-16)
 
 ### Features
