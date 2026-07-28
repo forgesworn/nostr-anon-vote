@@ -32,6 +32,9 @@
   ],
   "author": "ForgeSworn",
   "license": "MIT",
+  "publishConfig": {
+    "provenance": true
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/forgesworn/nostr-anon-vote.git"
