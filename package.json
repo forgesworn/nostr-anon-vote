@@ -1,6 +1,6 @@
 {
   "name": "nostr-anon-vote",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Anonymous voting on Nostr with LSAG ring signatures — double-vote prevention without revealing identity",
   "type": "module",
   "main": "./dist/index.js",

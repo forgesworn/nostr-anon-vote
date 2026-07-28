@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.2 (2026-07-28)
+
+### Bug Fixes
+
+- set publishConfig.provenance so anvil can publish
+
+
+
 ## 0.2.1 (2026-07-28)
 
 ### Bug Fixes
