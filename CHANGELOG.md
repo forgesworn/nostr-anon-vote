@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.1 (2026-07-28)
+
+### Bug Fixes
+
+- clear 4 dev-dependency advisories (vitest, vite, postcss, esbuild) (deps)
+
+
+
 ## 0.2.0 (2026-07-28)
 
 ### Features
