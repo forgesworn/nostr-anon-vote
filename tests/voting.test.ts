@@ -14,6 +14,7 @@ import {
   createElection, parseElection, castBallot, verifyBallot, tallyElection,
   encryptBallotContent, decryptBallotContent,
   validateElection, validateBallot, validateElectionResult,
+  computeRingHash,
 } from '../src/voting.js';
 import { computeKeyImage } from '@forgesworn/ring-sig';
 import { generateKeyPair } from '../src/nostr.js';
@@ -333,10 +334,9 @@ describe('voting protocol', () => {
         voter1.privateKey, election, selectedOption, eligibleRing,
       );
 
-      // The ring-sig tag contains the LSAG signature as JSON
-      const ringSigTag = event.tags.find((t) => t[0] === 'ring-sig');
-      expect(ringSigTag).toBeDefined();
-      const ringSigJson = ringSigTag![1];
+      // The ballot content carries the LSAG signature as JSON
+      const ringSigJson = event.content;
+      expect(ringSigJson).not.toBe('');
 
       // The plaintext vote MUST NOT appear in the ring signature
       expect(ringSigJson).not.toContain(selectedOption);
@@ -713,5 +713,192 @@ describe('full voting flow integration', () => {
     const noResult = result.tags.find(t => t[0] === 'result' && t[1] === 'No');
     expect(yesResult?.[2]).toBe('2');
     expect(noResult?.[2]).toBe('1');
+  });
+});
+
+describe('realistic ring sizes', () => {
+  // The ring-size ceiling defect survived because the largest ring under test
+  // was 3, while the validation bound sat at 5. Anything here above 5 would
+  // have caught it.
+  const authority = generateKeyPair();
+  const tally = generateKeyPair();
+
+  function makeRing(size: number) {
+    const voters = Array.from({ length: size }, () => generateKeyPair());
+    return { voters, ring: voters.map(v => v.publicKey) };
+  }
+
+  it('casts, validates and verifies a ballot at ring size 128', { timeout: 30_000 }, async () => {
+    const { voters, ring } = makeRing(128);
+    const election = await createElection(
+      authority.privateKey,
+      makeElectionParams({ electionId: 'ring-128', tallyPubkeys: [tally.publicKey] }),
+    );
+
+    const { event } = await castBallot(voters[64].privateKey, election, 'Option A', ring);
+
+    expect(validateBallot(event).valid).toBe(true);
+    expect(verifyBallot(event, election, ring).valid).toBe(true);
+  });
+
+  // Generous timeout on purpose: LSAG is O(n) per ballot with no point caching,
+  // so three ballots against a 64-member ring is several seconds of real work.
+  // See docs/WEIGHTED-VOTING.md — the verifier-context fix makes this ~11x faster.
+  it('tallies an election with a 64-member ring', { timeout: 30_000 }, async () => {
+    const { voters, ring } = makeRing(64);
+    const election = await createElection(
+      authority.privateKey,
+      makeElectionParams({
+        electionId: 'ring-64-tally',
+        options: ['Yes', 'No'],
+        tallyPubkeys: [tally.publicKey],
+      }),
+    );
+
+    const ballots = await Promise.all([
+      castBallot(voters[0].privateKey, election, 'Yes', ring),
+      castBallot(voters[1].privateKey, election, 'Yes', ring),
+      castBallot(voters[2].privateKey, election, 'No', ring),
+    ]);
+
+    const result = await tallyElection(
+      ballots.map(b => b.event), election, tally.privateKey, ring,
+    );
+
+    expect(result.tags.find(t => t[0] === 'result' && t[1] === 'Yes')?.[2]).toBe('2');
+    expect(result.tags.find(t => t[0] === 'result' && t[1] === 'No')?.[2]).toBe('1');
+  });
+
+  it('keeps every tag inside the 1024-character bound at ring size 128', { timeout: 30_000 }, async () => {
+    const { voters, ring } = makeRing(128);
+    const election = await createElection(
+      authority.privateKey,
+      makeElectionParams({ electionId: 'ring-128-bounds', tallyPubkeys: [tally.publicKey] }),
+    );
+    const { event } = await castBallot(voters[0].privateKey, election, 'Option A', ring);
+
+    for (const tag of event.tags) {
+      for (const value of tag.slice(1)) {
+        expect(value.length).toBeLessThanOrEqual(1024);
+      }
+    }
+    // The signature is in content, which is bounded at 65536 instead.
+    expect(event.content.length).toBeGreaterThan(1024);
+    expect(event.content.length).toBeLessThanOrEqual(65536);
+  });
+
+  it('omits the ring from the wire format', async () => {
+    const { voters, ring } = makeRing(16);
+    const election = await createElection(
+      authority.privateKey,
+      makeElectionParams({ electionId: 'no-ring-on-wire', tallyPubkeys: [tally.publicKey] }),
+    );
+    const { event } = await castBallot(voters[0].privateKey, election, 'Option A', ring);
+
+    const sig = JSON.parse(event.content);
+    expect(sig.ring).toBeUndefined();
+    expect(sig.keyImage).toBeUndefined();
+    // No ring member's pubkey should appear anywhere in the serialised ballot.
+    const wire = JSON.stringify(event);
+    for (const pk of ring) expect(wire).not.toContain(pk);
+  });
+});
+
+describe('ring commitment', () => {
+  const authority = generateKeyPair();
+  const tally = generateKeyPair();
+
+  it('rejects a substituted ring when the election commits to one', async () => {
+    const voters = Array.from({ length: 8 }, () => generateKeyPair());
+    const ring = voters.map(v => v.publicKey);
+    const election = await createElection(
+      authority.privateKey,
+      makeElectionParams({
+        electionId: 'committed-ring',
+        tallyPubkeys: [tally.publicKey],
+        eligibleRing: ring,
+      }),
+    );
+
+    expect(parseElection(election)?.ringHash).toBeDefined();
+
+    // Casting against the committed ring works.
+    const { event } = await castBallot(voters[0].privateKey, election, 'Option A', ring);
+    expect(verifyBallot(event, election, ring).valid).toBe(true);
+
+    // A voter-chosen ring padded with decoys of their own is refused.
+    const attackerRing = [...ring, ...Array.from({ length: 4 }, () => generateKeyPair().publicKey)];
+    await expect(
+      castBallot(voters[0].privateKey, election, 'Option A', attackerRing),
+    ).rejects.toThrow(/does not match the ring committed/);
+
+    // And a verifier handed the wrong ring rejects rather than silently accepting.
+    const verdict = verifyBallot(event, election, attackerRing);
+    expect(verdict.valid).toBe(false);
+    expect(verdict.errors.join(' ')).toMatch(/does not match the ring committed/);
+  });
+
+  it('stays optional — elections without a commitment still work', async () => {
+    const voters = Array.from({ length: 8 }, () => generateKeyPair());
+    const ring = voters.map(v => v.publicKey);
+    const election = await createElection(
+      authority.privateKey,
+      makeElectionParams({ electionId: 'uncommitted-ring', tallyPubkeys: [tally.publicKey] }),
+    );
+
+    expect(parseElection(election)?.ringHash).toBeUndefined();
+    const { event } = await castBallot(voters[0].privateKey, election, 'Option A', ring);
+    expect(verifyBallot(event, election, ring).valid).toBe(true);
+  });
+
+  it('is order-sensitive, matching the LSAG ring order', async () => {
+    const ring = Array.from({ length: 4 }, () => generateKeyPair().publicKey);
+    expect(computeRingHash(ring)).not.toBe(computeRingHash([...ring].reverse()));
+  });
+});
+
+describe('legacy ballot compatibility', () => {
+  const authority = generateKeyPair();
+  const tally = generateKeyPair();
+
+  /** Rebuild a ballot in the pre-content format: full signature in a tag. */
+  function toLegacyFormat(event: NostrEvent, ring: string[]): NostrEvent {
+    const keyImage = event.tags.find(t => t[0] === 'key-image')![1];
+    const fullSig = { ...JSON.parse(event.content), ring, keyImage };
+    return {
+      ...event,
+      content: '',
+      tags: [...event.tags, ['ring-sig', JSON.stringify(fullSig)]],
+    };
+  }
+
+  it('still verifies ballots carrying the signature in a ring-sig tag', async () => {
+    const voters = Array.from({ length: 4 }, () => generateKeyPair());
+    const ring = voters.map(v => v.publicKey);
+    const election = await createElection(
+      authority.privateKey,
+      makeElectionParams({ electionId: 'legacy-ballot', tallyPubkeys: [tally.publicKey] }),
+    );
+
+    const { event } = await castBallot(voters[1].privateKey, election, 'Option A', ring);
+    const legacy = toLegacyFormat(event, ring);
+
+    expect(legacy.content).toBe('');
+    expect(validateBallot(legacy).valid).toBe(true);
+    expect(verifyBallot(legacy, election, ring).valid).toBe(true);
+  });
+
+  it('still rejects a legacy ballot whose inline ring was swapped', async () => {
+    const voters = Array.from({ length: 4 }, () => generateKeyPair());
+    const ring = voters.map(v => v.publicKey);
+    const election = await createElection(
+      authority.privateKey,
+      makeElectionParams({ electionId: 'legacy-swapped', tallyPubkeys: [tally.publicKey] }),
+    );
+
+    const { event } = await castBallot(voters[1].privateKey, election, 'Option A', ring);
+    const legacy = toLegacyFormat(event, [...ring].reverse());
+
+    expect(verifyBallot(legacy, election, ring).valid).toBe(false);
   });
 });

@@ -1,9 +1,9 @@
 // Nostr event utilities for nostr-anon-vote
 // Schnorr signatures (BIP-340) on secp256k1, event ID computation, tag helpers
 
-import { schnorr } from '@noble/curves/secp256k1';
-import { sha256 } from '@noble/hashes/sha256';
-import { bytesToHex, hexToBytes, utf8ToBytes } from '@noble/hashes/utils';
+import { schnorr } from '@noble/curves/secp256k1.js';
+import { sha256 } from '@noble/hashes/sha2.js';
+import { bytesToHex, hexToBytes, utf8ToBytes } from '@noble/hashes/utils.js';
 import type { UnsignedEvent, NostrEvent } from './types.js';
 
 export const MAX_CONTENT_LENGTH = 65536;
@@ -13,7 +13,7 @@ export const MAX_TAGS_COUNT = 100;
 /** Generate a new secp256k1 keypair. Returns { privateKey, publicKey } as hex strings.
  *  Public key is x-only (32 bytes) per BIP-340 / Nostr convention. */
 export function generateKeyPair(): { privateKey: string; publicKey: string } {
-  const privateKeyRaw = schnorr.utils.randomPrivateKey();
+  const privateKeyRaw = schnorr.utils.randomSecretKey();
   const publicKey = schnorr.getPublicKey(privateKeyRaw);
   const privateKey = bytesToHex(privateKeyRaw);
   const publicKeyHex = bytesToHex(publicKey);
@@ -54,7 +54,8 @@ export async function signEvent(
   privateKey: string,
 ): Promise<NostrEvent> {
   const id = getEventId(event);
-  const sig = schnorr.sign(id, privateKey);
+  // noble v2 requires Uint8Array for both message and secret key.
+  const sig = schnorr.sign(hexToBytes(id), hexToBytes(privateKey));
   return {
     ...event,
     id,

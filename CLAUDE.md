@@ -66,7 +66,13 @@ Optional: `description`, `eligible-entity-type` (multiple), `eligible-min-tier`,
 
 ### Kind 30483 — Ballot
 
-Required tags: `d` (unique per ballot, includes random suffix), `election` (election event ID), `key-image`, `ring-sig` (JSON-serialised `LsagSignature`), `encrypted-vote`, `algo`, `L`, `l`.
+Required tags: `d` (unique per ballot, includes random suffix), `election` (election event ID), `key-image`, `encrypted-vote`, `algo`, `L`, `l`.
+
+**`content` holds the LSAG signature** as JSON, with `ring` and `keyImage` omitted — the verifier reconstructs them from the eligible ring and the `key-image` tag. Neither can be forged this way because both feed the LSAG challenge chain, so a wrong value fails verification.
+
+This is deliberate. Tag values are capped at 1024 characters and the signature grows ~134 bytes per ring member, so the previous `ring-sig` tag made the library reject its own ballots above a ring size of 5. `content` is capped at 65536, which carries ~990 members — finally consistent with ring-sig's `MAX_RING_SIZE` of 1000.
+
+Legacy ballots carrying a `ring-sig` tag with an empty `content` still verify. `verifyBallot` prefers `content` and falls back to the tag.
 
 The `event.pubkey` is the ephemeral pubkey, not the voter's real key.
 
@@ -81,13 +87,14 @@ Required tags: `d` (`electionId:result`), `election`, `total-ballots`, `total-el
 | Max content length | 65 536 chars |
 | Max tag value length | 1 024 chars |
 | Max tags per event | 100 |
-| Max ring size | 1 000 |
+| Max ring size | 1 000 (ring-sig); ~990 in practice, bounded by the 65536 content cap |
 | Min ring size | 2 (enforced by ring-sig) |
 | Future timestamp tolerance | 60 seconds |
 
 ## Pitfalls
 
-- The `eligibleRing` array order must be consistent between `castBallot` and `verifyBallot`/`tallyElection`. The ring order is included inside the LSAG signature; a mismatch will cause verification to fail.
+- The `eligibleRing` array order must be consistent between `castBallot` and `verifyBallot`/`tallyElection`. The ring order feeds the LSAG signature; a mismatch will cause verification to fail. `computeRingHash` is order-sensitive for the same reason.
+- Pass `eligibleRing` to `createElection` to commit a `ring-hash` to the election. Without it the ring is unpinned, and a voter can present a ring of their own choosing and be identified by the intersection of the rings they appear in. It is optional for backwards compatibility, but you want it.
 - `verifyBallot` does **not** check key image uniqueness — that is the tally's responsibility.
 - `castBallot` validates that the election is currently open (`opens ≤ now < closes`). Signing an event with a backdated `created_at` will not bypass this check because `castBallot` uses `Date.now()` internally.
 - Ballot events signed by ephemeral keys are not associated with any Nostr profile. Relays that require POW or NIP-42 authentication may reject them.

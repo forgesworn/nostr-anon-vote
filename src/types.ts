@@ -44,6 +44,9 @@ export interface ElectionParams {
   tallyPubkeys: string[];
   tallyThreshold?: [m: number, n: number];
   ringSize?: number;
+  /** Eligible voter ring. When supplied, its hash is committed to the election
+   *  as a `ring-hash` tag so the ring cannot be substituted per-ballot. */
+  eligibleRing?: string[];
 }
 
 export interface ParsedElection {
@@ -61,6 +64,8 @@ export interface ParsedElection {
   tallyPubkeys: string[];
   tallyThreshold?: [m: number, n: number];
   ringSize?: number;
+  /** Commitment to the eligible ring, if the election declared one. */
+  ringHash?: string;
   authorityPubkey: string;
   algorithm: CryptoAlgorithm;
 }

@@ -1,10 +1,10 @@
 // nostr-anon-vote Voting Protocol
 // Election creation, ballot casting with LSAG ring signatures, and tallying.
 
-import { secp256k1 } from '@noble/curves/secp256k1';
-import { sha256 } from '@noble/hashes/sha256';
-import { hkdf } from '@noble/hashes/hkdf';
-import { bytesToHex, hexToBytes, utf8ToBytes, randomBytes } from '@noble/hashes/utils';
+import { secp256k1 } from '@noble/curves/secp256k1.js';
+import { sha256 } from '@noble/hashes/sha2.js';
+import { hkdf } from '@noble/hashes/hkdf.js';
+import { bytesToHex, hexToBytes, utf8ToBytes, randomBytes } from '@noble/hashes/utils.js';
 import { generateKeyPair as genKey, getPublicKey, signEvent, getTagValue, validateFieldSizeBounds } from './nostr.js';
 import { VOTING_KINDS, DEFAULT_LABEL, DEFAULT_CRYPTO_ALGORITHM } from './constants.js';
 import { computeKeyImage, lsagSign, lsagVerify } from '@forgesworn/ring-sig';
@@ -85,6 +85,16 @@ export async function createElection(
 
   if (params.ringSize !== undefined) {
     tags.push(['ring-size', String(params.ringSize)]);
+  }
+
+  // Commit to the eligible ring so it cannot be substituted per-ballot.
+  // Without this, each voter could present a ring of their own choosing and be
+  // identified by the intersection of the rings they appear in.
+  if (params.eligibleRing !== undefined) {
+    if (params.eligibleRing.length < 2) {
+      throw new VotingError('Eligible ring must have at least 2 members');
+    }
+    tags.push(['ring-hash', computeRingHash(params.eligibleRing)]);
   }
 
   const unsigned: UnsignedEvent = {
@@ -177,6 +187,12 @@ export function parseElection(event: NostrEvent): ParsedElection | null {
   if (tallyThreshold) parsed.tallyThreshold = tallyThreshold;
   if (ringSize !== undefined) parsed.ringSize = ringSize;
 
+  const ringHash = getTagValue(event, 'ring-hash');
+  if (ringHash) {
+    if (!/^[0-9a-f]{64}$/i.test(ringHash)) return null;
+    parsed.ringHash = ringHash.toLowerCase();
+  }
+
   return parsed;
 }
 
@@ -197,13 +213,13 @@ export async function encryptBallotContent(
   const ephemeral = genKey();
 
   // ECDH: ephemeralPriv * tallyPub (prepend '02' to x-only pubkey)
-  const tallyPoint = secp256k1.ProjectivePoint.fromHex('02' + tallyPubkey);
-  const ephScalar = BigInt('0x' + ephemeral.privateKey) % secp256k1.CURVE.n;
+  const tallyPoint = secp256k1.Point.fromHex('02' + tallyPubkey);
+  const ephScalar = BigInt('0x' + ephemeral.privateKey) % secp256k1.Point.Fn.ORDER;
   if (ephScalar === 0n) {
     throw new CryptoError('Ephemeral private key is zero — cannot perform ECDH');
   }
   const sharedPoint = tallyPoint.multiply(ephScalar);
-  if (sharedPoint.equals(secp256k1.ProjectivePoint.ZERO)) {
+  if (sharedPoint.equals(secp256k1.Point.ZERO)) {
     throw new CryptoError('ECDH produced identity point — invalid public key');
   }
   const sharedX = sharedPoint.toAffine().x;
@@ -212,7 +228,9 @@ export async function encryptBallotContent(
   const sharedSecret = sha256(sharedXBytes);
 
   // HKDF-SHA256 to derive AES key
-  const aesKey = hkdf(sha256, sharedSecret, new Uint8Array(0), 'signet-ballot-encrypt-v1', 32);
+  // noble v2 requires bytes for `info`. utf8ToBytes yields the same bytes the
+  // string form produced, so existing ballots stay decryptable.
+  const aesKey = hkdf(sha256, sharedSecret, new Uint8Array(0), utf8ToBytes('signet-ballot-encrypt-v1'), 32);
 
   // AES-256-GCM encryption
   const nonce = crypto.getRandomValues(new Uint8Array(12));
@@ -254,13 +272,13 @@ export async function decryptBallotContent(
   const ciphertext = hexToBytes(ciphertextHex);
 
   // ECDH: tallyPriv * ephemeralPub
-  const ephemeralPoint = secp256k1.ProjectivePoint.fromHex('02' + ephemeralPubkeyHex);
-  const tallyScalar = BigInt('0x' + tallyPrivateKey) % secp256k1.CURVE.n;
+  const ephemeralPoint = secp256k1.Point.fromHex('02' + ephemeralPubkeyHex);
+  const tallyScalar = BigInt('0x' + tallyPrivateKey) % secp256k1.Point.Fn.ORDER;
   if (tallyScalar === 0n) {
     throw new CryptoError('Invalid tally private key (zero after mod N reduction)');
   }
   const sharedPoint = ephemeralPoint.multiply(tallyScalar);
-  if (sharedPoint.equals(secp256k1.ProjectivePoint.ZERO)) {
+  if (sharedPoint.equals(secp256k1.Point.ZERO)) {
     throw new CryptoError('ECDH produced identity point — invalid public key');
   }
   const sharedX = sharedPoint.toAffine().x;
@@ -268,7 +286,9 @@ export async function decryptBallotContent(
   const sharedSecret = sha256(sharedXBytes);
 
   // HKDF-SHA256 to derive AES key
-  const aesKey = hkdf(sha256, sharedSecret, new Uint8Array(0), 'signet-ballot-encrypt-v1', 32);
+  // noble v2 requires bytes for `info`. utf8ToBytes yields the same bytes the
+  // string form produced, so existing ballots stay decryptable.
+  const aesKey = hkdf(sha256, sharedSecret, new Uint8Array(0), utf8ToBytes('signet-ballot-encrypt-v1'), 32);
 
   // AES-256-GCM decryption
   const cryptoKey = await crypto.subtle.importKey(
@@ -286,6 +306,45 @@ export async function decryptBallotContent(
 // ---------------------------------------------------------------------------
 // Ballot casting and verification
 // ---------------------------------------------------------------------------
+
+/**
+ * Commitment to an eligible ring. Order is significant — the LSAG signature is
+ * computed over the ordered ring, so the hash must not sort.
+ */
+export function computeRingHash(ring: string[]): string {
+  return bytesToHex(sha256(utf8ToBytes(ring.join(','))));
+}
+
+/**
+ * Serialise an LSAG signature for transport in a ballot's `content`.
+ *
+ * `ring` is omitted: it is reconstructed by the verifier from the eligible ring,
+ * which the `ring-hash` election tag pins. `keyImage` is omitted: it travels as
+ * its own tag so the tally can deduplicate without parsing content. Together
+ * these roughly halve ballot size.
+ */
+function serialiseBallotSig(sig: LsagSignature): string {
+  const obj: Record<string, unknown> = {
+    c0: sig.c0,
+    electionId: sig.electionId,
+    message: sig.message,
+    responses: sig.responses,
+  };
+  if (sig.domain !== undefined) obj.domain = sig.domain;
+  return JSON.stringify(obj);
+}
+
+/** Shape check for the fields a serialised ballot signature must carry. */
+function isBallotSigShape(raw: unknown): raw is Omit<LsagSignature, 'ring' | 'keyImage'> {
+  if (!raw || typeof raw !== 'object') return false;
+  const o = raw as Record<string, unknown>;
+  return typeof o.c0 === 'string'
+    && typeof o.electionId === 'string'
+    && typeof o.message === 'string'
+    && Array.isArray(o.responses)
+    && o.responses.every((r) => typeof r === 'string')
+    && (o.domain === undefined || typeof o.domain === 'string');
+}
 
 /**
  * Cast a ballot in an election using LSAG ring signatures for voter anonymity.
@@ -311,6 +370,11 @@ export async function castBallot(
   const signerIndex = eligibleRing.indexOf(voterPubkey);
   if (signerIndex === -1) {
     throw new VotingError('Voter public key not found in eligible ring');
+  }
+
+  // If the election committed to a ring, the one supplied must be that ring.
+  if (parsed.ringHash && computeRingHash(eligibleRing) !== parsed.ringHash) {
+    throw new VotingError('Eligible ring does not match the ring committed by the election');
   }
 
   // Validate selected option
@@ -348,7 +412,6 @@ export async function castBallot(
     ['d', `${parsed.electionId}:${bytesToHex(randomBytes(16))}`],
     ['election', election.id],
     ['key-image', keyImage],
-    ['ring-sig', JSON.stringify(ringSig)],
     ['encrypted-vote', encryptedVote],
     ['algo', DEFAULT_CRYPTO_ALGORITHM],
     ['L', DEFAULT_LABEL],
@@ -360,7 +423,10 @@ export async function castBallot(
     pubkey: ephemeral.publicKey,
     created_at: now,
     tags,
-    content: '',
+    // The signature lives in content, not a tag. Tag values are bounded at 1024
+    // characters, which the signature exceeds above a ring size of 5; content is
+    // bounded at 65536, which carries roughly 480 members.
+    content: serialiseBallotSig(ringSig),
   };
 
   const event = await signEvent(unsigned, ephemeral.privateKey);
@@ -408,32 +474,62 @@ export function verifyBallot(
     errors.push('Ballot timestamp is in the future');
   }
 
-  // Parse ring signature
-  const ringSigStr = getTagValue(ballot, 'ring-sig');
-  if (!ringSigStr) {
-    errors.push('Missing ring-sig tag');
-    return { valid: errors.length === 0, errors };
-  }
-
-  let ringSig: LsagSignature;
-  try {
-    const raw = JSON.parse(ringSigStr);
-    if (!raw || typeof raw !== 'object' || !Array.isArray(raw.ring) ||
-        typeof raw.message !== 'string' || typeof raw.c0 !== 'string' ||
-        !Array.isArray(raw.responses) || typeof raw.keyImage !== 'string' ||
-        typeof raw.electionId !== 'string') {
-      errors.push('Invalid ring-sig structure');
-      return { valid: false, errors };
-    }
-    ringSig = raw as LsagSignature;
-  } catch {
-    errors.push('Invalid ring-sig JSON');
+  // If the election committed to a ring, the ring supplied here must be that
+  // ring. This is what stops a voter presenting a ring of their own choosing
+  // and being identified by the intersection of the rings they appear in.
+  if (parsed.ringHash && computeRingHash(eligibleRing) !== parsed.ringHash) {
+    errors.push('Eligible ring does not match the ring committed by the election');
     return { valid: false, errors };
   }
 
-  // Verify ring matches eligible ring
-  if (JSON.stringify(ringSig.ring) !== JSON.stringify(eligibleRing)) {
-    errors.push('Ring in signature does not match eligible ring');
+  const keyImageTag = getTagValue(ballot, 'key-image');
+  if (!keyImageTag) {
+    errors.push('Missing key-image tag');
+    return { valid: false, errors };
+  }
+
+  // Current format keeps the signature in `content` with `ring` and `keyImage`
+  // stripped; both are reconstructed here. Neither can be forged by doing so,
+  // because both feed the LSAG challenge chain and a wrong value fails
+  // verification. Legacy ballots carry the whole signature in a `ring-sig` tag.
+  const legacySigStr = getTagValue(ballot, 'ring-sig');
+  let ringSig: LsagSignature;
+
+  if (ballot.content) {
+    let raw: unknown;
+    try {
+      raw = JSON.parse(ballot.content);
+    } catch {
+      errors.push('Invalid ballot signature JSON');
+      return { valid: false, errors };
+    }
+    if (!isBallotSigShape(raw)) {
+      errors.push('Invalid ballot signature structure');
+      return { valid: false, errors };
+    }
+    ringSig = { ...raw, ring: eligibleRing, keyImage: keyImageTag };
+  } else if (legacySigStr) {
+    try {
+      const raw = JSON.parse(legacySigStr);
+      if (!raw || typeof raw !== 'object' || !Array.isArray(raw.ring) ||
+          typeof raw.message !== 'string' || typeof raw.c0 !== 'string' ||
+          !Array.isArray(raw.responses) || typeof raw.keyImage !== 'string' ||
+          typeof raw.electionId !== 'string') {
+        errors.push('Invalid ring-sig structure');
+        return { valid: false, errors };
+      }
+      ringSig = raw as LsagSignature;
+    } catch {
+      errors.push('Invalid ring-sig JSON');
+      return { valid: false, errors };
+    }
+    // Legacy ballots carry the ring inline, so check it against the eligible ring.
+    if (JSON.stringify(ringSig.ring) !== JSON.stringify(eligibleRing)) {
+      errors.push('Ring in signature does not match eligible ring');
+    }
+  } else {
+    errors.push('Ballot carries no ring signature');
+    return { valid: false, errors };
   }
 
   // Verify election ID in signature matches
@@ -458,8 +554,9 @@ export function verifyBallot(
     }
   }
 
-  // Verify key-image tag matches signature
-  const keyImageTag = getTagValue(ballot, 'key-image');
+  // Verify key-image tag matches signature. Tautological on the current format
+  // (the key image is reconstructed from this tag) but load-bearing for legacy
+  // ballots, where the signature carries its own copy.
   if (keyImageTag !== ringSig.keyImage) {
     errors.push('Key image tag does not match ring signature key image');
   }
@@ -628,7 +725,10 @@ export function validateBallot(event: NostrEvent): ValidationResult {
   if (!getTagValue(event, 'd')) errors.push('Missing "d" tag');
   if (!getTagValue(event, 'election')) errors.push('Missing "election" tag');
   if (!getTagValue(event, 'key-image')) errors.push('Missing "key-image" tag');
-  if (!getTagValue(event, 'ring-sig')) errors.push('Missing "ring-sig" tag');
+  // The signature lives in `content`; legacy ballots carry it in a `ring-sig` tag.
+  if (!event.content && !getTagValue(event, 'ring-sig')) {
+    errors.push('Ballot carries no ring signature (expected content or "ring-sig" tag)');
+  }
   if (!getTagValue(event, 'encrypted-vote')) errors.push('Missing "encrypted-vote" tag');
   return { valid: errors.length === 0, errors };
 }
