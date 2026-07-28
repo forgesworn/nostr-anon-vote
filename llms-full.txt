@@ -195,6 +195,11 @@ Optional tags:
 - `["eligible-community", communityId]`
 - `["tally-threshold", "m/n"]`
 - `["ring-size", maxSize]`
+- `["ring-hash", sha256Hex]` — commitment to the eligible ring, set by passing
+  `eligibleRing` to `createElection`. Without it the ring is unpinned and a
+  voter can present a ring of their own choosing, then be identified by the
+  intersection of the rings they appear in. Order-sensitive, matching the LSAG
+  ring order.
 
 ### Kind 30483 — Ballot
 
@@ -202,11 +207,21 @@ Required tags:
 - `["d", "electionId:randomHex"]` — unique per ballot
 - `["election", electionEventId]`
 - `["key-image", keyImageHex]`
-- `["ring-sig", jsonSerialised]` — serialised LsagSignature
 - `["encrypted-vote", encryptedHex]`
 - `["algo", "secp256k1"]`
 - `["L", "anon-vote"]`
 - `["l", "anon-vote"]`
+
+`event.content` holds the serialised LsagSignature, with `ring` and `keyImage`
+omitted — the verifier reconstructs them from the eligible ring and the
+`key-image` tag. Neither can be forged this way because both feed the LSAG
+challenge chain, so a wrong value fails verification.
+
+This is why: tag values are capped at 1024 characters and the signature grows
+~134 bytes per ring member, so the old `["ring-sig", ...]` tag made the library
+reject its own ballots above a ring size of 5. Content is capped at 65536,
+carrying ~990 members. Ballots written before v0.2.0 carry the signature in a
+`ring-sig` tag with empty content, and still verify.
 
 Note: `event.pubkey` is the ephemeral pubkey, not the voter's real key.
 
