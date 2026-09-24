@@ -1,16 +1,16 @@
 # nostr-anon-vote
 
-Anonymous voting on Nostr using LSAG ring signatures — double-vote prevention without revealing identity.
+> Elections need voters to prove they are eligible without revealing who voted for what. `nostr-anon-vote` runs anonymous, double-vote-resistant elections on Nostr using LSAG ring signatures.
 
 ## What it does
 
 `nostr-anon-vote` lets you run cryptographically verifiable elections on Nostr where:
 
 - Voters prove they are eligible (in the ring) without revealing *which* member voted
-- Double-voting is impossible to do undetected — every ballot carries a key image that is unique per voter per election, so a tally authority can spot duplicates without unmasking the voter
-- Vote content is encrypted until tallying — no one sees how you voted until the tally authority decrypts
-- Optional re-vote — if the election allows it, a voter can change their mind; only their latest ballot counts
-- Fully auditable — anyone can re-run `verifyBallot` on every ballot and confirm the tally is correct
+- Double-voting is impossible to do undetected: every ballot carries a key image that is unique per voter per election, so a tally authority can spot duplicates without unmasking the voter
+- Vote content is encrypted until tallying, so no one sees how you voted until the tally authority decrypts
+- Optional re-vote: if the election allows it, a voter can change their mind; only their latest ballot counts
+- Fully auditable: anyone can re-run `verifyBallot` on every ballot and confirm the tally is correct
 
 The underlying cryptography is LSAG (Linkable Spontaneous Anonymous Group) signatures on secp256k1, provided by [`@forgesworn/ring-sig`](https://www.npmjs.com/package/@forgesworn/ring-sig).
 
@@ -39,7 +39,7 @@ const voter1Pubkey = '...';
 const voter2Pubkey = '...';
 const voter3Pubkey = '...';
 
-// All eligible voters form the ring (minimum 2, order matters — must be consistent)
+// All eligible voters form the ring (minimum 2, order matters: must be consistent)
 const eligibleRing = [voter1Pubkey, voter2Pubkey, voter3Pubkey];
 
 // 1. Organiser creates the election (kind 30482)
@@ -84,7 +84,7 @@ const result = await tallyElection(
 
 ### LSAG ring signatures
 
-An LSAG signature proves "I know the private key for one of these N public keys" without revealing which one. This is the anonymity guarantee. The signature also produces a **key image** — a deterministic value derived from the signer's private key and the election ID. Key images are unique per voter per election, enabling double-vote detection without unmasking.
+An LSAG signature proves "I know the private key for one of these N public keys" without revealing which one. This is the anonymity guarantee. The signature also produces a **key image**: a deterministic value derived from the signer's private key and the election ID. Key images are unique per voter per election, enabling double-vote detection without unmasking.
 
 ### Key image
 
@@ -92,7 +92,7 @@ Computed as `H(privkey || electionId)` mapped to a curve point. If the same vote
 
 ### Ballot encryption
 
-Vote content is encrypted with ECDH + HKDF + AES-256-GCM to the tally authority's public key. The LSAG signature signs a commitment to the ciphertext (`electionId:sha256(ciphertext)`) — not the plaintext. This means the ring signature cannot be replayed against a different vote.
+Vote content is encrypted with ECDH + HKDF + AES-256-GCM to the tally authority's public key. The LSAG signature signs a commitment to the ciphertext (`electionId:sha256(ciphertext)`), not the plaintext. This means the ring signature cannot be replayed against a different vote.
 
 ### Event kinds
 
@@ -108,14 +108,14 @@ Kind numbers are provisional (pending NIP assignment). All events carry `["L", "
 
 `ElectionScale` is a hint for the election's intended scope:
 
-- `'organisational'` — internal team or DAO vote
-- `'community'` — public community vote
-- `'national'` — large-scale civic use
+- `'organisational'`: internal team or DAO vote
+- `'community'`: public community vote
+- `'national'`: large-scale civic use
 
 ### Re-vote policy
 
-- `'allowed'` — a voter may submit multiple ballots; tallying keeps the one with the highest `created_at`
-- `'denied'` — first ballot wins; subsequent ballots from the same key image are counted as invalid
+- `'allowed'`: a voter may submit multiple ballots; tallying keeps the one with the highest `created_at`
+- `'denied'`: first ballot wins; subsequent ballots from the same key image are counted as invalid
 
 ## API surface
 
@@ -190,7 +190,7 @@ UnsignedEvent         // NostrEvent without id/sig
 - Ring size is capped at 1000 per election (configurable via `ringSize` tag)
 - Ballot timestamps more than 60 seconds in the future are rejected
 - Event content is capped at 65 536 characters; tag values at 1 024 characters; max 100 tags
-- Ballot events are signed by an ephemeral keypair — the voter's real Nostr identity never appears on-chain
+- Ballot events are signed by an ephemeral keypair: the voter's real Nostr identity never appears on-chain
 - LSAG message binds to `sha256(encryptedVote)` to prevent signature reuse across different ciphertexts
 
 ## Repository
@@ -199,9 +199,9 @@ https://github.com/forgesworn/nostr-anon-vote
 
 ## Dependencies
 
-- [`@forgesworn/ring-sig`](https://www.npmjs.com/package/@forgesworn/ring-sig) — LSAG ring signatures on secp256k1
-- [`@noble/curves`](https://www.npmjs.com/package/@noble/curves) — secp256k1 ECDH for ballot encryption
-- [`@noble/hashes`](https://www.npmjs.com/package/@noble/hashes) — SHA-256, HKDF
+- [`@forgesworn/ring-sig`](https://www.npmjs.com/package/@forgesworn/ring-sig): LSAG ring signatures on secp256k1
+- [`@noble/curves`](https://www.npmjs.com/package/@noble/curves): secp256k1 ECDH for ballot encryption
+- [`@noble/hashes`](https://www.npmjs.com/package/@noble/hashes): SHA-256, HKDF
 
 ## Licence
 
